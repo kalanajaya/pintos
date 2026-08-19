@@ -23,14 +23,14 @@ GCCPREFIX := $(shell if i386-elf-objdump -i 2>&1 | grep '^elf32-i386$$' >/dev/nu
   echo "***" 1>&2; exit 1; fi)
 endif
 
-CC  = gcc
-AS  = as
-AR  = ar
-LD  = ld
-NM  = nm
-RANLIB = ranlib
-OBJCOPY = objcopy
-OBJDUMP = objdump
+CC  = $(GCCPREFIX)gcc
+AS  = $(GCCPREFIX)as
+AR  = $(GCCPREFIX)ar
+LD  = $(GCCPREFIX)ld
+NM  = $(GCCPREFIX)nm
+RANLIB = $(GCCPREFIX)ranlib
+OBJCOPY = $(GCCPREFIX)objcopy
+OBJDUMP = $(GCCPREFIX)objdump
 
 ifeq ($(strip $(shell command -v $(CC) 2> /dev/null)),)
 $(warning *** Compiler ($(CC)) not found.  Did you set $$PATH properly?  Please refer to the Getting Started section in the documentation for details. ***)
@@ -39,10 +39,10 @@ endif
 # Compiler and assembler invocation.
 DEFINES =
 WARNINGS = -Wall -W -Wstrict-prototypes -Wmissing-prototypes -Wsystem-headers
-CFLAGS = -m32 -g -msoft-float -O0 -fno-PIE -fno-pie -mno-sse
+CFLAGS = -m32 -g -msoft-float -O0
 CPPFLAGS = -nostdinc -I$(SRCDIR) -I$(SRCDIR)/lib
 ASFLAGS = -Wa,--gstabs,--32
-LDFLAGS = -no-pie
+LDFLAGS = 
 # LDOPTIONS will be applied directly with 'ld' while LDFLAGS will be applied with 'gcc'.
 LDOPTIONS = -melf_i386
 DEPS = -MMD -MF $(@:.o=.d)
