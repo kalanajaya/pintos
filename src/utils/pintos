@@ -564,15 +564,16 @@ sub run_bochs {
   # Write bochsrc.txt configuration file.
   open (BOCHSRC, ">", "bochsrc.txt") or die "bochsrc.txt: create: $!\n";
   print BOCHSRC <<EOF;
-romimage: file=\$BXSHARE/BIOS-bochs-latest
-vgaromimage: file=\$BXSHARE/VGABIOS-lgpl-latest
+romimage: file=\$BXSHARE/BIOS-bochs-legacy
+vgaromimage: file=\$BXSHARE/VGABIOS-lgpl-latest.bin
 boot: disk
 cpu: ips=1000000
 megs: $mem
 log: bochsout.txt
 panic: action=fatal
-user_shortcut: keys=ctrlaltdel
 EOF
+  print BOCHSRC "sound: driver=dummy\n";
+  print BOCHSRC "speaker: enabled=0\n";
   print BOCHSRC "gdbstub: enabled=1, port=$gdbport\n" if $debug eq 'gdb';
   print BOCHSRC "clock: sync=", $realtime ? 'realtime' : 'none',
   ", time0=0\n";

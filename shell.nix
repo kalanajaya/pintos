@@ -8,6 +8,7 @@ in
       pkgs.gdb
       pkgs.cgdb
       pkgs.qemu
+      pkgs.bochs
       pkgs.perl
       pkgs.gnumake
     ];
