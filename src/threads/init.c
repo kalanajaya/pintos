@@ -135,13 +135,14 @@ int pintos_init(void) {
   printf("      Welcome to PintOS!\n");
   printf("================================\n");
   printf("\n");
-  printf("Type 'help' to view available commands.\n");
 
   if (*argv != NULL) {
     /* Run actions specified on kernel command line. */
     run_actions(argv);
   } else {
     // TODO: no command line passed to kernel. Run interactively
+    printf("Type 'help' to view available commands.\n");
+
     while (1) {
       printf("CS2043> ");
 
