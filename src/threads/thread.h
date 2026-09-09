@@ -85,7 +85,10 @@ struct thread {
   enum thread_status status; /* Thread state. */
   char name[16];             /* Name (for debugging purposes). */
   uint8_t *stack;            /* Saved stack pointer. */
+  int base_priority;         /* the thread's true priority */
   int priority;              /* Priority. */
+  struct list locks_held;    /* locks heald by the thread */
+  struct lock *wait_on_lock; /* lock the thread is currently waiting on */
   struct list_elem allelem;  /* List element for all threads list. */
   int64_t
       wakeup_tick; /* Absolute tick count of when the thread should wakeup */
@@ -141,5 +144,9 @@ int thread_get_load_avg(void);
 /* Deals with the sleep_list*/
 void thread_sleep(int64_t start, int64_t ticks);
 void thread_wakeup(int64_t current_ticks);
+
+bool priority_more_func(const struct list_elem *a, const struct list_elem *b,
+                        void *aux);
+void thread_yield_if_preempted(void);
 
 #endif /* threads/thread.h */
