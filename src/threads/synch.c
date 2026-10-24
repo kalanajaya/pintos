@@ -185,7 +185,7 @@ void lock_acquire(struct lock *lock) {
   ASSERT(!intr_context());
   ASSERT(!lock_held_by_current_thread(lock));
 
-  if (lock->holder != NULL) {
+  if (!thread_mlfqs && lock->holder != NULL) {
 
     cur->wait_on_lock = lock;
 
@@ -250,11 +250,9 @@ void lock_release(struct lock *lock) {
   /* Remove the lock from the thread's locks_held list */
   list_remove(&lock->elem);
 
-  /* Recalculate the thread's effective priority */
-  cur->priority = cur->base_priority;
-
   /* Recalculate effective priority based on remaining held locks */
-  thread_update_priority(cur);
+  if (!thread_mlfqs)
+    thread_update_priority(cur);
 
   /* Disown the lock and wake up the highest-priority waiting thread */
   lock->holder = NULL;

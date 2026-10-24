@@ -6,6 +6,7 @@
 #include "threads/switch.h"
 #include "threads/synch.h"
 #include "threads/vaddr.h"
+#include "devices/timer.h"
 #include <debug.h>
 #include <random.h>
 #include <stddef.h>
@@ -60,6 +61,10 @@ static unsigned thread_ticks; /* # of timer ticks since last yield. */
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
 bool thread_mlfqs;
+static real_t load_avg;
+
+static void mlfqs_update_recent_cpu_action(struct thread *t, void *aux UNUSED);
+static void mlfqs_update_priority_action(struct thread *t, void *aux UNUSED);
 
 static void kernel_thread(thread_func *, void *aux);
 
@@ -94,11 +99,19 @@ void thread_init(void) {
   list_init(&all_list);
   list_init(&sleep_list);
 
+  load_avg = FP_CONST(0);
+
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread();
   init_thread(initial_thread, "main", PRI_DEFAULT);
   initial_thread->status = THREAD_RUNNING;
   initial_thread->tid = allocate_tid();
+
+  if (thread_mlfqs) {
+    initial_thread->nice = NICE_DEFAULT;
+    initial_thread->recent_cpu = FP_CONST(0);
+    thread_mlfqs_update_priority(initial_thread);
+  }
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -130,6 +143,33 @@ void thread_tick(void) {
 #endif
   else
     kernel_ticks++;
+
+  if (thread_mlfqs) {
+    /* Increment recent_cpu for the running thread */
+    if (t != idle_thread)
+      t->recent_cpu = FP_ADD_MIX(t->recent_cpu, 1);
+
+    int64_t ticks = timer_ticks();
+    /* Once per second (every TIMER_FREQ ticks), update load_avg and recent_cpu of all threads */
+    if (ticks % TIMER_FREQ == 0) {
+      thread_mlfqs_update_load_avg();
+      thread_foreach(mlfqs_update_recent_cpu_action, NULL);
+    }
+
+    /* Every 4 ticks, update priority of all threads */
+    if (ticks % 4 == 0) {
+      thread_foreach(mlfqs_update_priority_action, NULL);
+      list_sort(&ready_list, priority_more_func, NULL);
+    }
+
+    /* Yield if the running thread is no longer the highest priority */
+    if (!list_empty(&ready_list)) {
+      struct thread *top =
+          list_entry(list_front(&ready_list), struct thread, elem);
+      if (top->priority > t->priority)
+        intr_yield_on_return();
+    }
+  }
 
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
@@ -225,9 +265,27 @@ tid_t thread_create(const char *name, int priority, thread_func *function,
   if (t == NULL)
     return TID_ERROR;
 
+  /* If MLFQS is enabled, ignore the passed priority argument. */
+  if (thread_mlfqs) {
+    priority = PRI_DEFAULT; /* Temporary base, updated immediately below */
+  }
+
   /* Initialize thread. */
   init_thread(t, name, priority);
   tid = t->tid = allocate_tid();
+
+  /* Initialize MLFQS fields if enabled. */
+  if (thread_mlfqs) {
+    struct thread *cur = running_thread();
+    if (is_thread(cur) && cur != idle_thread) {
+      t->nice = cur->nice;
+      t->recent_cpu = cur->recent_cpu;
+    } else {
+      t->nice = NICE_DEFAULT;
+      t->recent_cpu = FP_CONST(0);
+    }
+    thread_mlfqs_update_priority(t);
+  }
 
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame(t, sizeof *kf);
@@ -398,6 +456,9 @@ void thread_update_priority(struct thread *t) {
 
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void thread_set_priority(int new_priority) {
+  if (thread_mlfqs)
+    return;
+
   struct thread *cur = thread_current();
   cur->base_priority = new_priority;
 
@@ -412,25 +473,80 @@ void thread_set_priority(int new_priority) {
 /* Returns the current thread's priority. */
 int thread_get_priority(void) { return thread_current()->priority; }
 
+/* Updates priority for thread T based on its recent_cpu and nice values. */
+void thread_mlfqs_update_priority(struct thread *t) {
+  if (t == idle_thread)
+    return;
+
+  real_t term1 = FP_CONST(PRI_MAX);
+  real_t term2 = FP_DIV_MIX(t->recent_cpu, 4);
+  real_t term3 = FP_CONST(t->nice * 2);
+  real_t res = FP_SUB(FP_SUB(term1, term2), term3);
+  int p = FP_INT_ROUND(res);
+  if (p < PRI_MIN)
+    p = PRI_MIN;
+  if (p > PRI_MAX)
+    p = PRI_MAX;
+  t->priority = p;
+}
+
+/* Updates recent_cpu for thread T based on load_avg and nice. */
+void thread_mlfqs_update_recent_cpu(struct thread *t) {
+  if (t == idle_thread)
+    return;
+
+  real_t num = FP_MULT_MIX(load_avg, 2);
+  real_t denom = FP_ADD_MIX(num, 1);
+  real_t coeff = FP_DIV(num, denom);
+  t->recent_cpu = FP_ADD_MIX(FP_MULT(coeff, t->recent_cpu), t->nice);
+}
+
+/* Updates system load_avg. */
+void thread_mlfqs_update_load_avg(void) {
+  int ready_threads = list_size(&ready_list);
+  if (thread_current() != idle_thread)
+    ready_threads++;
+
+  real_t term1 = FP_DIV_MIX(FP_MULT_MIX(load_avg, 59), 60);
+  real_t term2 = FP_DIV_MIX(FP_CONST(ready_threads), 60);
+  load_avg = FP_ADD(term1, term2);
+}
+
+static void mlfqs_update_recent_cpu_action(struct thread *t, void *aux UNUSED) {
+  if (t != idle_thread) {
+    thread_mlfqs_update_recent_cpu(t);
+  }
+}
+
+static void mlfqs_update_priority_action(struct thread *t, void *aux UNUSED) {
+  if (t != idle_thread) {
+    thread_mlfqs_update_priority(t);
+  }
+}
+
 /* Sets the current thread's nice value to NICE. */
-void thread_set_nice(int nice UNUSED) { /* Not yet implemented. */ }
+void thread_set_nice(int nice) {
+  enum intr_level old_level = intr_disable();
+  struct thread *cur = thread_current();
+  cur->nice = nice;
+  thread_mlfqs_update_priority(cur);
+  intr_set_level(old_level);
+  thread_yield_if_preempted();
+}
 
 /* Returns the current thread's nice value. */
 int thread_get_nice(void) {
-  /* Not yet implemented. */
-  return 0;
+  return thread_current()->nice;
 }
 
 /* Returns 100 times the system load average. */
 int thread_get_load_avg(void) {
-  /* Not yet implemented. */
-  return 0;
+  return FP_INT_ROUND(FP_MULT_MIX(load_avg, 100));
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int thread_get_recent_cpu(void) {
-  /* Not yet implemented. */
-  return 0;
+  return FP_INT_ROUND(FP_MULT_MIX(thread_current()->recent_cpu, 100));
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.

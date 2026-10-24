@@ -1,6 +1,7 @@
 #ifndef THREADS_THREAD_H
 #define THREADS_THREAD_H
 
+#include "threads/fixed-point.h"
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
@@ -91,7 +92,9 @@ struct thread {
   struct lock *wait_on_lock; /* lock the thread is currently waiting on */
   struct list_elem allelem;  /* List element for all threads list. */
   int64_t
-      wakeup_tick; /* Absolute tick count of when the thread should wakeup */
+      wakeup_tick;   /* Absolute tick count of when the thread should wakeup */
+  int nice;          /* Niceness value (-20 to 20). */
+  real_t recent_cpu; /* Amount of CPU time recently consumed. */
 
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
@@ -138,10 +141,18 @@ void thread_set_priority(int);
 void thread_update_priority(struct thread *t);
 void thread_reorder_ready(struct thread *t);
 
+#define NICE_MIN -20
+#define NICE_DEFAULT 0
+#define NICE_MAX 20
+
 int thread_get_nice(void);
 void thread_set_nice(int);
 int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
+
+void thread_mlfqs_update_priority(struct thread *t);
+void thread_mlfqs_update_recent_cpu(struct thread *t);
+void thread_mlfqs_update_load_avg(void);
 
 /* Deals with the sleep_list*/
 void thread_sleep(int64_t start, int64_t ticks);
