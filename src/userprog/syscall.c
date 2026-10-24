@@ -5,6 +5,7 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "userprog/pagedir.h"
+#include "userprog/process.h"
 #include "devices/shutdown.h"
 #include "devices/input.h"
 
@@ -118,14 +119,12 @@ syscall_handler (struct intr_frame *f)
     case SYS_EXEC:
       get_args (f, args, 1);
       check_valid_string ((const char *) args[0]);
-      /* Exec implementation will be finalized in Phase 4 */
-      f->eax = -1;
+      f->eax = process_execute ((const char *) args[0]);
       break;
 
     case SYS_WAIT:
       get_args (f, args, 1);
-      /* Wait implementation will be finalized in Phase 4 */
-      f->eax = -1;
+      f->eax = process_wait ((tid_t) args[0]);
       break;
 
     case SYS_CREATE:

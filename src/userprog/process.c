@@ -17,6 +17,7 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -30,9 +31,9 @@ process_execute (const char *file_name)
 {
   char *fn_copy;
   tid_t tid;
-
   char prog_name[16];
   size_t i;
+  struct child_entry *child;
 
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
@@ -46,21 +47,56 @@ process_execute (const char *file_name)
     prog_name[i] = file_name[i];
   prog_name[i] = '\0';
 
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (prog_name, PRI_DEFAULT, start_process, fn_copy);
+  /* Allocate child tracking entry. */
+  child = malloc (sizeof *child);
+  if (child == NULL)
+    {
+      palloc_free_page (fn_copy);
+      return TID_ERROR;
+    }
+
+  child->tid = TID_ERROR;
+  child->exit_status = -1;
+  child->has_waited = false;
+  child->load_success = false;
+  child->fn_copy = fn_copy;
+  child->ref_cnt = 2;
+  sema_init (&child->sema_load, 0);
+  sema_init (&child->sema_exit, 0);
+
+  /* Create a new thread to execute prog_name. Pass child struct as aux. */
+  tid = thread_create (prog_name, PRI_DEFAULT, start_process, child);
   if (tid == TID_ERROR)
-    palloc_free_page (fn_copy); 
+    {
+      palloc_free_page (fn_copy);
+      free (child);
+      return TID_ERROR;
+    }
+
+  child->tid = tid;
+  list_push_back (&thread_current ()->child_list, &child->elem);
+
+  /* Wait for child process to finish loading its executable. */
+  sema_down (&child->sema_load);
+
+  if (!child->load_success)
+    return TID_ERROR;
+
   return tid;
 }
 
 /* A thread function that loads a user process and starts it
    running. */
 static void
-start_process (void *file_name_)
+start_process (void *child_)
 {
-  char *file_name = file_name_;
+  struct child_entry *child = child_;
+  char *file_name = child->fn_copy;
   struct intr_frame if_;
   bool success;
+
+  /* Link this thread to its child entry. */
+  thread_current ()->child_entry = child;
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
@@ -69,8 +105,13 @@ start_process (void *file_name_)
   if_.eflags = FLAG_IF | FLAG_MBS;
   success = load (file_name, &if_.eip, &if_.esp);
 
-  /* If load failed, quit. */
+  /* Signal load status to the waiting parent. */
+  child->load_success = success;
   palloc_free_page (file_name);
+  child->fn_copy = NULL;
+  sema_up (&child->sema_load);
+
+  /* If load failed, quit. */
   if (!success) 
     thread_exit ();
 
@@ -89,17 +130,44 @@ start_process (void *file_name_)
    exception), returns -1.  If TID is invalid or if it was not a
    child of the calling process, or if process_wait() has already
    been successfully called for the given TID, returns -1
-   immediately, without waiting.
-
-   This function will be implemented in problem 2-2.  For now, it
-   does nothing. */
+   immediately, without waiting. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid) 
 {
-  int i;
-  for (i = 0; i < 500; i++)
-    thread_yield ();
-  return -1;
+  struct thread *cur = thread_current ();
+  struct list_elem *e;
+  struct child_entry *child = NULL;
+
+  /* Search for child with TID in caller's child_list. */
+  for (e = list_begin (&cur->child_list); e != list_end (&cur->child_list);
+       e = list_next (e))
+    {
+      struct child_entry *c = list_entry (e, struct child_entry, elem);
+      if (c->tid == child_tid)
+        {
+          child = c;
+          break;
+        }
+    }
+
+  /* Must fail if not a direct child or already waited on. */
+  if (child == NULL || child->has_waited)
+    return -1;
+
+  child->has_waited = true;
+
+  /* Wait for child to exit. */
+  sema_down (&child->sema_exit);
+
+  int status = child->exit_status;
+
+  /* Remove from child_list and release parent's reference. */
+  list_remove (&child->elem);
+  child->ref_cnt--;
+  if (child->ref_cnt == 0)
+    free (child);
+
+  return status;
 }
 
 /* Free the current process's resources. */
@@ -114,19 +182,33 @@ process_exit (void)
   pd = cur->pagedir;
   if (pd != NULL) 
     {
-      /* Print termination message required for user processes */
+      /* Print termination message required for user processes. */
       printf ("%s: exit(%d)\n", cur->name, cur->exit_status);
 
-      /* Correct ordering here is crucial.  We must set
-         cur->pagedir to NULL before switching page directories,
-         so that a timer interrupt can't switch back to the
-         process page directory.  We must activate the base page
-         directory before destroying the process's page
-         directory, or our active page directory will be one
-         that's been freed (and cleared). */
       cur->pagedir = NULL;
       pagedir_activate (NULL);
       pagedir_destroy (pd);
+    }
+
+  /* If this process was tracked by a parent, save exit status and signal. */
+  if (cur->child_entry != NULL)
+    {
+      cur->child_entry->exit_status = cur->exit_status;
+      sema_up (&cur->child_entry->sema_exit);
+      cur->child_entry->ref_cnt--;
+      if (cur->child_entry->ref_cnt == 0)
+        free (cur->child_entry);
+      cur->child_entry = NULL;
+    }
+
+  /* Clean up all child entries for this process (orphaned children). */
+  while (!list_empty (&cur->child_list))
+    {
+      struct list_elem *e = list_pop_front (&cur->child_list);
+      struct child_entry *c = list_entry (e, struct child_entry, elem);
+      c->ref_cnt--;
+      if (c->ref_cnt == 0)
+        free (c);
     }
 }
 
