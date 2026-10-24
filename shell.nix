@@ -31,9 +31,24 @@ in
         make -C "$ENV_DIR/utils" >/dev/null 2>&1 || true
       fi
 
-      # 2. Alias i686-elf-* binaries to match the i386-elf-* prefix Pintos expects
-      ln -sf $(which i686-elf-gcc) "$ENV_DIR/bin/i386-elf-gcc" 2>/dev/null || true
-      ln -sf $(which i686-elf-ld) "$ENV_DIR/bin/i386-elf-ld" 2>/dev/null || true
+      # 2. Compatibility wrappers for modern GCC/binutils with legacy Pintos
+      REAL_GCC=$(which gcc)
+      cat << EOF > "$ENV_DIR/bin/gcc"
+#!/bin/sh
+exec "$REAL_GCC" -B$PWD/$ENV_DIR/bin -fcommon "\$@"
+EOF
+      chmod +x "$ENV_DIR/bin/gcc"
+
+      REAL_LD=$(which ld)
+      cat << EOF > "$ENV_DIR/bin/ld"
+#!/bin/sh
+exec "$REAL_LD" -z noseparate-code "\$@"
+EOF
+      chmod +x "$ENV_DIR/bin/ld"
+
+      # Also alias i386-elf-* binaries to match prefixes Pintos expects
+      ln -sf "$ENV_DIR/bin/gcc" "$ENV_DIR/bin/i386-elf-gcc"
+      ln -sf "$ENV_DIR/bin/ld" "$ENV_DIR/bin/i386-elf-ld"
       ln -sf $(which i686-elf-as) "$ENV_DIR/bin/i386-elf-as" 2>/dev/null || true
       ln -sf $(which i686-elf-objdump) "$ENV_DIR/bin/i386-elf-objdump" 2>/dev/null || true
       ln -sf $(which i686-elf-objcopy) "$ENV_DIR/bin/i386-elf-objcopy" 2>/dev/null || true
