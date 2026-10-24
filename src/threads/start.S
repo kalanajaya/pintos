@@ -38,8 +38,10 @@ start:
 #### purposes.  We cap memory at 64 MB because that's all we prepare
 #### page tables for, below.
 
+	subl %eax, %eax
 	movb $0x88, %ah
 	int $0x15
+	andl $0xffff, %eax
 	addl $1024, %eax	# Total kB memory
 	cmp $0x10000, %eax	# Cap at 64 MB
 	jbe 1f

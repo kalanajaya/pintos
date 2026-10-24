@@ -27,6 +27,7 @@ in
         patchShebangs "$ENV_DIR/utils" >/dev/null 2>&1
 
         # Build the C utilities (squish-pty, squish-unix) inside the hidden dir
+        make -C "$ENV_DIR/utils" clean >/dev/null 2>&1 || true
         make -C "$ENV_DIR/utils" >/dev/null 2>&1 || true
       fi
 
@@ -36,6 +37,7 @@ in
       ln -sf $(which i686-elf-as) "$ENV_DIR/bin/i386-elf-as" 2>/dev/null || true
       ln -sf $(which i686-elf-objdump) "$ENV_DIR/bin/i386-elf-objdump" 2>/dev/null || true
       ln -sf $(which i686-elf-objcopy) "$ENV_DIR/bin/i386-elf-objcopy" 2>/dev/null || true
+      ln -sf $(which i686-elf-addr2line) "$ENV_DIR/bin/i386-elf-addr2line" 2>/dev/null || true
       ln -sf $(which gdb) "$ENV_DIR/bin/i386-elf-gdb" 2>/dev/null || true
 
       # 3. Prepend our isolated utilities and aliases to PATH
