@@ -31,6 +31,9 @@ process_execute (const char *file_name)
   char *fn_copy;
   tid_t tid;
 
+  char prog_name[16];
+  size_t i;
+
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
@@ -38,8 +41,13 @@ process_execute (const char *file_name)
     return TID_ERROR;
   strlcpy (fn_copy, file_name, PGSIZE);
 
+  /* Extract program name for thread_create (up to 15 chars). */
+  for (i = 0; file_name[i] != '\0' && file_name[i] != ' ' && i < sizeof (prog_name) - 1; i++)
+    prog_name[i] = file_name[i];
+  prog_name[i] = '\0';
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (prog_name, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
   return tid;
@@ -88,6 +96,9 @@ start_process (void *file_name_)
 int
 process_wait (tid_t child_tid UNUSED) 
 {
+  int i;
+  for (i = 0; i < 500; i++)
+    thread_yield ();
   return -1;
 }
 
@@ -103,6 +114,9 @@ process_exit (void)
   pd = cur->pagedir;
   if (pd != NULL) 
     {
+      /* Print termination message required for user processes */
+      printf ("%s: exit(%d)\n", cur->name, cur->exit_status);
+
       /* Correct ordering here is crucial.  We must set
          cur->pagedir to NULL before switching page directories,
          so that a timer interrupt can't switch back to the
@@ -196,6 +210,7 @@ struct Elf32_Phdr
 #define PF_R 4          /* Readable. */
 
 static bool setup_stack (void **esp);
+static bool push_arguments (const char *cmdline, void **esp);
 static bool validate_segment (const struct Elf32_Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
                           uint32_t read_bytes, uint32_t zero_bytes,
@@ -214,6 +229,8 @@ load (const char *file_name, void (**eip) (void), void **esp)
   off_t file_ofs;
   bool success = false;
   int i;
+  char prog_name[64];
+  size_t j;
 
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
@@ -221,11 +238,16 @@ load (const char *file_name, void (**eip) (void), void **esp)
     goto done;
   process_activate ();
 
+  /* Extract executable name. */
+  for (j = 0; file_name[j] != '\0' && file_name[j] != ' ' && j < sizeof (prog_name) - 1; j++)
+    prog_name[j] = file_name[j];
+  prog_name[j] = '\0';
+
   /* Open executable file. */
-  file = filesys_open (file_name);
+  file = filesys_open (prog_name);
   if (file == NULL) 
     {
-      printf ("load: %s: open failed\n", file_name);
+      printf ("load: %s: open failed\n", prog_name);
       goto done; 
     }
 
@@ -303,6 +325,10 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
   /* Set up stack. */
   if (!setup_stack (esp))
+    goto done;
+
+  /* Push command line arguments onto the stack. */
+  if (!push_arguments (file_name, esp))
     goto done;
 
   /* Start address. */
@@ -442,6 +468,117 @@ setup_stack (void **esp)
         palloc_free_page (kpage);
     }
   return success;
+}
+
+/* Parses the command line arguments and pushes them onto the user stack
+   according to the 80x86 calling convention. */
+static bool
+push_arguments (const char *cmdline, void **esp)
+{
+  char *cmd_copy;
+  char *token, *save_ptr;
+  char *argv[128];
+  uintptr_t argv_ptrs[128];
+  int argc = 0;
+  int i;
+
+  /* Make a copy of cmdline to tokenize since strtok_r mutates the string. */
+  cmd_copy = palloc_get_page (0);
+  if (cmd_copy == NULL)
+    return false;
+  strlcpy (cmd_copy, cmdline, PGSIZE);
+
+  /* Tokenize the command line into argv array. */
+  for (token = strtok_r (cmd_copy, " ", &save_ptr); token != NULL;
+       token = strtok_r (NULL, " ", &save_ptr))
+    {
+      if (argc >= 127)
+        {
+          palloc_free_page (cmd_copy);
+          return false;
+        }
+      argv[argc++] = token;
+    }
+  argv[argc] = NULL;
+
+  /* 1. Push argument strings in right-to-left order. */
+  for (i = argc - 1; i >= 0; i--)
+    {
+      size_t len = strlen (argv[i]) + 1;
+      *esp = (char *) *esp - len;
+      if ((uint8_t *) *esp < (uint8_t *) PHYS_BASE - PGSIZE)
+        {
+          palloc_free_page (cmd_copy);
+          return false;
+        }
+      memcpy (*esp, argv[i], len);
+      argv_ptrs[i] = (uintptr_t) *esp;
+    }
+
+  /* 2. Round the stack pointer down to a multiple of 4 (word-align). */
+  uintptr_t align = (uintptr_t) *esp % 4;
+  if (align != 0)
+    {
+      *esp = (char *) *esp - align;
+      if ((uint8_t *) *esp < (uint8_t *) PHYS_BASE - PGSIZE)
+        {
+          palloc_free_page (cmd_copy);
+          return false;
+        }
+      memset (*esp, 0, align);
+    }
+
+  /* 3. Push null pointer sentinel for argv[argc]. */
+  *esp = (char **) *esp - 1;
+  if ((uint8_t *) *esp < (uint8_t *) PHYS_BASE - PGSIZE)
+    {
+      palloc_free_page (cmd_copy);
+      return false;
+    }
+  *(char **) *esp = NULL;
+
+  /* 4. Push addresses of the argument strings in right-to-left order. */
+  for (i = argc - 1; i >= 0; i--)
+    {
+      *esp = (char **) *esp - 1;
+      if ((uint8_t *) *esp < (uint8_t *) PHYS_BASE - PGSIZE)
+        {
+          palloc_free_page (cmd_copy);
+          return false;
+        }
+      *(char **) *esp = (char *) argv_ptrs[i];
+    }
+
+  /* 5. Push argv (the address of argv[0]). */
+  char **argv_start = (char **) *esp;
+  *esp = (char ***) *esp - 1;
+  if ((uint8_t *) *esp < (uint8_t *) PHYS_BASE - PGSIZE)
+    {
+      palloc_free_page (cmd_copy);
+      return false;
+    }
+  *(char ***) *esp = argv_start;
+
+  /* 6. Push argc. */
+  *esp = (int *) *esp - 1;
+  if ((uint8_t *) *esp < (uint8_t *) PHYS_BASE - PGSIZE)
+    {
+      palloc_free_page (cmd_copy);
+      return false;
+    }
+  *(int *) *esp = argc;
+
+  /* 7. Push fake return address (0). */
+  *esp = (void **) *esp - 1;
+  if ((uint8_t *) *esp < (uint8_t *) PHYS_BASE - PGSIZE)
+    {
+      palloc_free_page (cmd_copy);
+      return false;
+    }
+  *(void **) *esp = NULL;
+
+  palloc_free_page (cmd_copy);
+  return true;
 }
 
 /* Adds a mapping from user virtual address UPAGE to kernel
