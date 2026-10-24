@@ -8,6 +8,10 @@
 #include "userprog/process.h"
 #include "devices/shutdown.h"
 #include "devices/input.h"
+#include "filesys/filesys.h"
+#include "filesys/file.h"
+
+struct lock filesys_lock;
 
 static void syscall_handler (struct intr_frame *);
 static void check_valid_ptr (const void *vaddr);
@@ -18,6 +22,7 @@ static void get_args (struct intr_frame *f, int *args, int n);
 void
 syscall_init (void) 
 {
+  lock_init (&filesys_lock);
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
 }
 
@@ -130,25 +135,70 @@ syscall_handler (struct intr_frame *f)
     case SYS_CREATE:
       get_args (f, args, 2);
       check_valid_string ((const char *) args[0]);
-      f->eax = false;
+      lock_acquire (&filesys_lock);
+      f->eax = filesys_create ((const char *) args[0], (unsigned) args[1]);
+      lock_release (&filesys_lock);
       break;
 
     case SYS_REMOVE:
       get_args (f, args, 1);
       check_valid_string ((const char *) args[0]);
-      f->eax = false;
+      lock_acquire (&filesys_lock);
+      f->eax = filesys_remove ((const char *) args[0]);
+      lock_release (&filesys_lock);
       break;
 
     case SYS_OPEN:
-      get_args (f, args, 1);
-      check_valid_string ((const char *) args[0]);
-      f->eax = -1;
-      break;
+      {
+        get_args (f, args, 1);
+        check_valid_string ((const char *) args[0]);
+        lock_acquire (&filesys_lock);
+        struct file *f_obj = filesys_open ((const char *) args[0]);
+        if (f_obj == NULL)
+          {
+            lock_release (&filesys_lock);
+            f->eax = -1;
+            break;
+          }
+        struct thread *cur = thread_current ();
+        int fd = -1;
+        for (int i = 2; i < MAX_FD; i++)
+          {
+            if (cur->fd_table[i] == NULL)
+              {
+                fd = i;
+                cur->fd_table[i] = f_obj;
+                break;
+              }
+          }
+        if (fd == -1)
+          file_close (f_obj);
+        lock_release (&filesys_lock);
+        f->eax = fd;
+        break;
+      }
 
     case SYS_FILESIZE:
-      get_args (f, args, 1);
-      f->eax = -1;
-      break;
+      {
+        get_args (f, args, 1);
+        int fd = args[0];
+        if (fd < 2 || fd >= MAX_FD)
+          {
+            f->eax = -1;
+            break;
+          }
+        struct thread *cur = thread_current ();
+        struct file *f_obj = cur->fd_table[fd];
+        if (f_obj == NULL)
+          {
+            f->eax = -1;
+            break;
+          }
+        lock_acquire (&filesys_lock);
+        f->eax = file_length (f_obj);
+        lock_release (&filesys_lock);
+        break;
+      }
 
     case SYS_READ:
       {
@@ -158,15 +208,34 @@ syscall_handler (struct intr_frame *f)
         unsigned size = (unsigned) args[2];
 
         check_valid_buffer (buffer, size);
+        if (size == 0)
+          {
+            f->eax = 0;
+            break;
+          }
         if (fd == 0)
           {
             uint8_t *buf = (uint8_t *) buffer;
             for (unsigned i = 0; i < size; i++)
               buf[i] = input_getc ();
             f->eax = size;
+            break;
           }
-        else
-          f->eax = -1;
+        if (fd < 2 || fd >= MAX_FD)
+          {
+            f->eax = -1;
+            break;
+          }
+        struct thread *cur = thread_current ();
+        struct file *f_obj = cur->fd_table[fd];
+        if (f_obj == NULL)
+          {
+            f->eax = -1;
+            break;
+          }
+        lock_acquire (&filesys_lock);
+        f->eax = file_read (f_obj, buffer, size);
+        lock_release (&filesys_lock);
         break;
       }
 
@@ -178,28 +247,94 @@ syscall_handler (struct intr_frame *f)
         unsigned size = (unsigned) args[2];
 
         check_valid_buffer (buffer, size);
+        if (size == 0)
+          {
+            f->eax = 0;
+            break;
+          }
         if (fd == 1)
           {
             putbuf (buffer, size);
             f->eax = size;
+            break;
           }
-        else
-          f->eax = -1;
+        if (fd < 2 || fd >= MAX_FD)
+          {
+            f->eax = -1;
+            break;
+          }
+        struct thread *cur = thread_current ();
+        struct file *f_obj = cur->fd_table[fd];
+        if (f_obj == NULL)
+          {
+            f->eax = -1;
+            break;
+          }
+        lock_acquire (&filesys_lock);
+        f->eax = file_write (f_obj, buffer, size);
+        lock_release (&filesys_lock);
         break;
       }
 
     case SYS_SEEK:
-      get_args (f, args, 2);
-      break;
+      {
+        get_args (f, args, 2);
+        int fd = args[0];
+        unsigned position = (unsigned) args[1];
+        if (fd >= 2 && fd < MAX_FD)
+          {
+            struct thread *cur = thread_current ();
+            struct file *f_obj = cur->fd_table[fd];
+            if (f_obj != NULL)
+              {
+                lock_acquire (&filesys_lock);
+                file_seek (f_obj, position);
+                lock_release (&filesys_lock);
+              }
+          }
+        break;
+      }
 
     case SYS_TELL:
-      get_args (f, args, 1);
-      f->eax = 0;
-      break;
+      {
+        get_args (f, args, 1);
+        int fd = args[0];
+        if (fd < 2 || fd >= MAX_FD)
+          {
+            f->eax = -1;
+            break;
+          }
+        struct thread *cur = thread_current ();
+        struct file *f_obj = cur->fd_table[fd];
+        if (f_obj == NULL)
+          {
+            f->eax = -1;
+            break;
+          }
+        lock_acquire (&filesys_lock);
+        f->eax = file_tell (f_obj);
+        lock_release (&filesys_lock);
+        break;
+      }
 
     case SYS_CLOSE:
-      get_args (f, args, 1);
-      break;
+      {
+        get_args (f, args, 1);
+        int fd = args[0];
+        if (fd >= 2 && fd < MAX_FD)
+          {
+            struct thread *cur = thread_current ();
+            struct file *f_obj = cur->fd_table[fd];
+            if (f_obj != NULL)
+              {
+                lock_acquire (&filesys_lock);
+                file_close (f_obj);
+                cur->fd_table[fd] = NULL;
+                lock_release (&filesys_lock);
+              }
+          }
+        break;
+      }
 
     default:
       sys_exit (-1);

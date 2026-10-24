@@ -633,6 +633,8 @@ static void init_thread(struct thread *t, const char *name, int priority) {
   list_init(&t->child_list);
   t->child_entry = NULL;
   t->exit_status = -1;
+  memset(t->fd_table, 0, sizeof t->fd_table);
+  t->executable = NULL;
 #endif
 
   old_level = intr_disable();
