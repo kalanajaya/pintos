@@ -104,9 +104,11 @@ void sema_up(struct semaphore *sema) {
   ASSERT(sema != NULL);
 
   old_level = intr_disable();
-  if (!list_empty(&sema->waiters))
+  if (!list_empty(&sema->waiters)) {
+    list_sort(&sema->waiters, priority_more_func, NULL);
     thread_unblock(
         list_entry(list_pop_front(&sema->waiters), struct thread, elem));
+  }
   sema->value++;
 
   intr_set_level(old_level);
@@ -197,6 +199,8 @@ void lock_acquire(struct lock *lock) {
       /* If our priority is higher, boost the holder's effective priority */
       if (holder->priority < cur->priority) {
         holder->priority = cur->priority;
+        /* Re-position holder in ready list if it is currently ready */
+        thread_reorder_ready(holder);
       }
 
       /* Move up the chain to the next lock the holder is waiting on */
@@ -249,17 +253,8 @@ void lock_release(struct lock *lock) {
   /* Recalculate the thread's effective priority */
   cur->priority = cur->base_priority;
 
-  if (!list_empty(&cur->locks_held)) {
-    struct list_elem *e;
-    /* Iterate through all remaining held locks to find the highest donation */
-    for (e = list_begin(&cur->locks_held); e != list_end(&cur->locks_held);
-         e = list_next(e)) {
-      struct lock *l = list_entry(e, struct lock, elem);
-      if (l->max_donation > cur->priority) {
-        cur->priority = l->max_donation;
-      }
-    }
-  }
+  /* Recalculate effective priority based on remaining held locks */
+  thread_update_priority(cur);
 
   /* Disown the lock and wake up the highest-priority waiting thread */
   lock->holder = NULL;

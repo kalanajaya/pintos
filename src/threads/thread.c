@@ -184,6 +184,17 @@ static void ready_list_insert(struct thread *t) {
   list_insert_ordered(&ready_list, &t->elem, priority_more_func, NULL);
 }
 
+/* If thread T is on the ready list, reorders it according to its updated
+ * priority. */
+void thread_reorder_ready(struct thread *t) {
+  enum intr_level old_level = intr_disable();
+  if (t->status == THREAD_READY) {
+    list_remove(&t->elem);
+    ready_list_insert(t);
+  }
+  intr_set_level(old_level);
+}
+
 /* Creates a new kernel thread named NAME with the given initial
    PRIORITY, which executes FUNCTION passing AUX as the argument,
    and adds it to the ready queue.  Returns the thread identifier
@@ -352,28 +363,47 @@ void thread_foreach(thread_action_func *func, void *aux) {
   }
 }
 
+/* Recalculates effective priority based on base_priority and all locks
+ * currently held. */
+void thread_update_priority(struct thread *t) {
+  enum intr_level old_level = intr_disable();
+
+  int max_prio = t->base_priority;
+
+  /* Check all locks currently held by this thread */
+  if (!list_empty(&t->locks_held)) {
+    struct list_elem *e;
+    for (e = list_begin(&t->locks_held); e != list_end(&t->locks_held);
+         e = list_next(e)) {
+      struct lock *l = list_entry(e, struct lock, elem);
+
+      /* Find the highest priority among all threads waiting for this lock */
+      if (!list_empty(&l->semaphore.waiters)) {
+        struct list_elem *w_elem;
+        for (w_elem = list_begin(&l->semaphore.waiters);
+             w_elem != list_end(&l->semaphore.waiters);
+             w_elem = list_next(w_elem)) {
+          struct thread *waiter = list_entry(w_elem, struct thread, elem);
+          if (waiter->priority > max_prio) {
+            max_prio = waiter->priority;
+          }
+        }
+      }
+    }
+  }
+
+  t->priority = max_prio;
+  intr_set_level(old_level);
+}
+
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void thread_set_priority(int new_priority) {
   struct thread *cur = thread_current();
   cur->base_priority = new_priority;
 
-  enum intr_level old_level = intr_disable();
-
-  /* Effective priority is the max of base priority and any active donations */
-  int max_prio = cur->base_priority;
-  if (!list_empty(&cur->locks_held)) {
-    struct list_elem *e;
-    for (e = list_begin(&cur->locks_held); e != list_end(&cur->locks_held);
-         e = list_next(e)) {
-      struct lock *l = list_entry(e, struct lock, elem);
-      if (l->max_donation > max_prio) {
-        max_prio = l->max_donation;
-      }
-    }
-  }
-  cur->priority = max_prio;
-
-  intr_set_level(old_level);
+  /* Recalculate effective priority in case we are currently holding donated
+   * locks */
+  thread_update_priority(cur);
 
   /* Yield if our effective priority dropped and we are no longer highest */
   thread_yield_if_preempted();
